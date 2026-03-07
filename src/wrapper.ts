@@ -12,8 +12,9 @@
  * schemas through the proxy without converting to zod types.
  */
 
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -46,9 +47,14 @@ const HIDDEN = new Set(["ctx_stats", "ctx_doctor", "ctx_upgrade"]);
 // ── Main ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  // 1. Resolve the upstream server bundle
+  // 1. Resolve the upstream server bundle relative to our install location,
+  //    not CWD — the wrapper may be invoked from any project directory.
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const wrapperRoot = __dirname.endsWith("/src")
+    ? dirname(__dirname) // dev: src/wrapper.ts → project root
+    : __dirname; // bundle: wrapper.bundle.mjs at project root
   const bundlePath = join(
-    process.cwd(),
+    wrapperRoot,
     "node_modules",
     "context-mode",
     "server.bundle.mjs",
