@@ -10,10 +10,12 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const bundlePath = require.resolve("context-mode/server.bundle.mjs");
+const pkgDir = dirname(require.resolve("context-mode/package.json"));
+const bundlePath = resolve(pkgDir, "server.bundle.mjs");
 
 const ORIGINAL = "await this.#i(i,s,o):await this.#s(a,s,o)";
 const PATCHED = "await this.#i(i,this.#t,o):await this.#s(a,this.#t,o)";

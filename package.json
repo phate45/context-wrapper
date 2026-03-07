@@ -5,11 +5,18 @@
   "private": true,
   "description": "Pre-warm wrapper for context-mode MCP server — indexes vault notes on startup",
   "scripts": {
-    "postinstall": "node patch-cwd.js"
+    "dev": "tsx src/wrapper.ts",
+    "build": "esbuild src/wrapper.ts --bundle --platform=node --target=node18 --format=esm --outfile=wrapper.bundle.mjs --external:better-sqlite3 --external:turndown --external:turndown-plugin-gfm --external:@mixmark-io/domino --minify",
+    "start": "node wrapper.bundle.mjs",
+    "check": "tsx scripts/check-upstream.ts",
+    "bump": "tsx scripts/bump.ts"
   },
   "dependencies": {
-    "context-mode": "^0.7.3",
-    "better-sqlite3": "^11.0.0"
+    "context-mode": "github:mksglu/context-mode#v1.0.14"
   },
-  "trustedDependencies": ["better-sqlite3"]
+  "devDependencies": {
+    "esbuild": "^0.27.3",
+    "tsx": "^4.21.0"
+  },
+  "trustedDependencies": ["better-sqlite3", "esbuild"]
 }

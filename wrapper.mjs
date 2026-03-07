@@ -652,8 +652,7 @@ async function main() {
   }
 
   // Resolve the server bundle from our own node_modules
-  const require = createRequire(import.meta.url);
-  const bundlePath = require.resolve("context-mode/server.bundle.mjs");
+  const bundlePath = join(__dirname, "node_modules", "context-mode", "server.bundle.mjs");
 
   // Set up JSON-RPC proxy before the bundle connects to stdio
   setupProxy();

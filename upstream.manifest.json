@@ -1,0 +1,22 @@
+{
+  "tag": "v1.0.14",
+  "generated": "2026-03-07T12:25:56.071Z",
+  "fingerprints": {
+    "dependencies": {
+      "hash": "2c95b6c52c808c6b",
+      "value": "@clack/prompts@^1.0.1\n@mixmark-io/domino@^2.2.0\n@modelcontextprotocol/sdk@^1.26.0\nbetter-sqlite3@^12.6.2\npicocolors@^1.1.1\nturndown-plugin-gfm@^1.0.2\nturndown@^7.2.0\nzod@^3.25.0"
+    },
+    "externals": {
+      "hash": "96c483c20aa52db3",
+      "value": "@mixmark-io/domino\nbetter-sqlite3\nturndown\nturndown-plugin-gfm"
+    },
+    "exports": {
+      "hash": "a86d9e59a48015b1",
+      "value": "{\n  \".\": \"./build/opencode-plugin.js\",\n  \"./plugin\": \"./build/opencode-plugin.js\",\n  \"./cli\": \"./build/cli.js\"\n}"
+    },
+    "version": {
+      "hash": "4da7c078da68921a",
+      "value": "1.0.14"
+    }
+  }
+}
