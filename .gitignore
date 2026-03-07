@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+bun.lock
+pnpm-lock.yaml
+
+# Python bytecode
+__pycache__/
+
+# MCP server runtime files
+.mcp-rce/
+
+# Machine-specific configuration
+.mcp.json
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/context-mode.json

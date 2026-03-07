@@ -1,0 +1,15 @@
+{
+  "name": "context-wrapper",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Pre-warm wrapper for context-mode MCP server — indexes vault notes on startup",
+  "scripts": {
+    "postinstall": "node patch-cwd.js"
+  },
+  "dependencies": {
+    "context-mode": "^0.7.3",
+    "better-sqlite3": "^11.0.0"
+  },
+  "trustedDependencies": ["better-sqlite3"]
+}
