@@ -4,9 +4,9 @@
 
 ## What This Is
 
-A pre-warm wrapper around the [context-mode](https://github.com/mksglu/claude-context-mode) MCP server. Populates a FTS5 database with configured markdown content before starting the server, eliminating the cold-start problem where `search()` returns nothing until content is manually indexed.
+A middleman MCP server wrapping [context-mode](https://github.com/mksglu/context-mode). Pre-warms the FTS5 database with configured markdown content on startup (eliminating cold-start), renames tools (drops `ctx_` prefix), merges `execute`+`execute_file`, and hides internal tools.
 
-Includes a JSON-RPC proxy layer and subagent routing hooks.
+Includes subagent routing hooks for Claude Code.
 
 See `README.md` for the user-facing integration guide.
 
@@ -14,66 +14,76 @@ See `README.md` for the user-facing integration guide.
 
 | File | Purpose |
 |------|---------|
-| `wrapper.mjs` | Entry point. Config discovery → DB pre-warm → JSON-RPC proxy → server launch. |
+| `src/wrapper.ts` | Entry point. Middleman MCP: spawns upstream server as subprocess, pre-warms DB, forwards tool calls with name mapping. |
+| `src/prewarm.ts` | Config discovery, file resolution (glob/exec/paths), preprocessing, ContentStore.index(). |
+| `wrapper.bundle.mjs` | Built artifact. `esbuild` output of `src/wrapper.ts` — what users run via `node`. |
 | `setup.js` | Install script. Detects package manager (bun/pnpm/npm), installs deps, prints `claude mcp add` command. |
-| `patch-cwd.js` | Postinstall script. Patches the server bundle so `execute` runs in project root, not tmpdir. |
 | `subagent-hook.sh` | Bash PreToolUse hook — injects routing instructions into subagent prompts. |
 | `subagent-hook.py` | Python equivalent of above. |
-| `package.json` | Dependencies: `context-mode` (the server) and `better-sqlite3` (native SQLite bindings). |
+| `scripts/check-upstream.ts` | Validates upstream coupling points against `upstream.manifest.json`. |
+| `scripts/bump.ts` | Updates git dep tag → installs → runs check. |
+| `package.json` | Dependencies: `context-mode` (upstream server), `@modelcontextprotocol/sdk` (MCP protocol), `zod`. |
 
 ## Architecture
 
+### Middleman MCP
+
+```
+Claude Code ↔ Our Server (stdin/stdout) ↔ [MCP Client → child process] ↔ Upstream Server
+```
+
+Our process is both:
+- An MCP **server** facing Claude Code (low-level `Server` class, raw JSON schema passthrough)
+- An MCP **client** facing the upstream context-mode subprocess (spawned via `StdioClientTransport`)
+
+### Tool Mapping
+
+| Exposed to CC | Upstream Call | Notes |
+|---------------|-------------|-------|
+| `execute` | `ctx_execute` or `ctx_execute_file` | `path` param → file variant |
+| `index` | `ctx_index` | Name only |
+| `search` | `ctx_search` | Name only |
+| `fetch_and_index` | `ctx_fetch_and_index` | Name only |
+| `batch_execute` | `ctx_batch_execute` | Name only |
+
+Hidden: `ctx_stats`, `ctx_doctor`, `ctx_upgrade`.
+
 ### Pre-Warm Phase
-1. Walk up from CWD looking for `.claude/context-mode.json` (first match wins)
-2. Resolve source files via three strategies: glob, exec, or explicit paths
-3. Preprocess (strip frontmatter, prefix dates, collapse blanks)
-4. Chunk markdown (heading-based splits, code block atomicity, heading stack for nested titles)
-5. Populate `/tmp/context-mode-{PID}.db` with FTS5 schema (porter + trigram) and vocabulary
+1. Connect to upstream subprocess → get its PID
+2. Walk up from CWD looking for `.claude/context-mode.json` (first match wins)
+3. Resolve source files via three strategies: glob, exec, or explicit paths
+4. Preprocess (strip frontmatter, prefix dates, collapse blanks)
+5. Index into `/tmp/context-mode-{upstream-PID}.db` using `ContentStore` import
+6. Upstream's lazy `getStore()` finds pre-warmed data on first tool call
 
-### JSON-RPC Proxy
-- Overrides `process.stdin`/`process.stdout` with PassThrough streams
-- Merges `execute` + `execute_file` into single `execute` tool (optional `path` param)
-- Hides `stats` tool; writes session stats to `/tmp/context-mode-{PID}-stats.log`
-- Request/response transforms via `LineBuffer` for chunk-safe JSON-RPC framing
+### Startup Sequence
+1. Spawn upstream `server.bundle.mjs` as child process
+2. MCP client connect + initialize handshake
+3. Pre-warm DB at subprocess PID path
+4. List upstream tools, build remapped tool list
+5. Register `tools/list` and `tools/call` handlers with name mapping
+6. Connect server transport to Claude Code's stdio
 
-### Server Launch
-- Dynamic-imports the context-mode server bundle
-- Bundle's `ContentStore` opens the same PID-based DB path, finds pre-warmed tables via `CREATE TABLE IF NOT EXISTS`
+## Coupling Points
 
-## Critical Coupling: context-mode Internals
+The middleman design minimizes coupling to two points:
 
-This wrapper replicates internal behavior from context-mode's `ContentStore` class. These coupling points must stay in sync when upgrading:
-
-### 1. Database Path Convention
+### 1. ContentStore Import (pre-warm only)
+```typescript
+import { ContentStore } from "../node_modules/context-mode/src/store.ts";
 ```
-/tmp/context-mode-{process.pid}.db
-```
-**Source:** `store.ts` constructor
+Used at startup to populate the FTS5 database. Constructor accepts optional `dbPath`.
 
-### 2. Schema (4 tables)
-- `sources` — metadata per indexed document
-- `chunks` — FTS5, `tokenize='porter unicode61'`
-- `chunks_trigram` — FTS5, `tokenize='trigram'`
-- `vocabulary` — unique words for fuzzy correction
+### 2. Tool Name Mapping
+The `TOOL_MAP` constant maps our names to upstream `ctx_*` names. If upstream renames tools, update the map.
 
-### 3. Chunking Algorithm
-Ported from `store.ts` `#chunkMarkdown()`:
-- Split on H1–H4 headings, maintain heading stack for ancestor chain
-- Fenced code blocks as atomic units
-- Horizontal rules as hard boundaries
-- `hasCode` flag → `content_type: "code"`
-
-### 4. Vocabulary Extraction
-Unicode-aware split (`/[^\p{L}\p{N}_-]+/u`), 3+ chars, minus stopwords.
-
-### 5. Stopwords
-Exact copy from `store.ts`. Must stay in sync.
+All other upstream internals (security, search throttling, intent search, network instrumentation, etc.) stay inside the subprocess — we don't import or replicate them.
 
 ## Upgrading context-mode
 
-1. Check the changelog / diff against coupling points above
-2. Pay special attention to: schema changes, chunking logic, DB path, stopwords
-3. Verify `patch-cwd.js` still matches the bundle structure
+1. Run `bun run bump v<new-tag>` — updates dep, installs, runs check
+2. Verify `ContentStore` constructor still accepts `dbPath` parameter
+3. Verify tool names haven't changed (check `server.ts` `registerTool` calls)
 4. Test: restart CC, run `search()` immediately — pre-warmed content should appear
 
 ## Per-Project Configuration
@@ -90,7 +100,7 @@ Each project that uses context-wrapper creates `.claude/context-mode.json` defin
 
 ## Preprocessing Options
 
-Pure functions in `wrapper.mjs`:
+Pure functions in `src/prewarm.ts`:
 - `stripFrontmatter` — removes YAML `---`/`---` blocks from file start
 - `prefixDates` — for `YYYY-MM-DD.md` files, prefixes topic headings with `[date]`
 - Blank line collapsing (always applied)
