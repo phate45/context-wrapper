@@ -199,19 +199,37 @@ async function main(): Promise<void> {
   );
 
   // 8. Graceful shutdown
-  const shutdown = () => {
-    client.close().catch(() => {});
-    server.close().catch(() => {});
+  //
+  //    When CC disconnects, stdin reaches EOF. The MCP SDK's
+  //    StdioServerTransport doesn't listen for 'end', so without
+  //    this handler both our process and the upstream child idle
+  //    forever as zombies.
+  const shutdown = async () => {
+    await Promise.allSettled([client.close(), server.close()]);
   };
-  process.on("SIGINT", () => {
-    shutdown();
+
+  // CC disconnect → stdin EOF
+  process.stdin.on("end", () => process.exit(0));
+
+  // Interactive / external signals
+  process.on("SIGINT", async () => {
+    await shutdown();
     process.exit(0);
   });
-  process.on("SIGTERM", () => {
-    shutdown();
+  process.on("SIGTERM", async () => {
+    await shutdown();
     process.exit(0);
   });
-  process.on("exit", shutdown);
+
+  // Last-resort sync cleanup — process.kill() is synchronous so
+  // it works inside the 'exit' handler where async can't complete.
+  process.on("exit", () => {
+    try {
+      process.kill(upstreamPid);
+    } catch {
+      /* already dead */
+    }
+  });
 }
 
 main().catch((err) => {
