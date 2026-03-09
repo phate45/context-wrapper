@@ -8,7 +8,7 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { join, dirname, basename, resolve } from "node:path";
+import { join, dirname, basename, resolve, relative } from "node:path";
 import { ContentStore } from "../node_modules/context-mode/src/store.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -29,6 +29,7 @@ export interface Config {
 }
 
 interface ResolvedFile {
+  /** Display name — relative path from source base, for unique labeling. */
   name: string;
   path: string;
   content: string;
@@ -89,11 +90,12 @@ function walkDir(dir: string, glob: string, recursive: boolean): string[] {
   return results;
 }
 
-function readFile(fullPath: string): ResolvedFile | null {
+function readFile(fullPath: string, baseDir?: string): ResolvedFile | null {
   try {
     const content = readFileSync(fullPath, "utf-8");
     if (content.trim().length === 0) return null;
-    return { name: basename(fullPath), path: fullPath, content };
+    const name = baseDir ? relative(baseDir, fullPath) : basename(fullPath);
+    return { name, path: fullPath, content };
   } catch {
     return null;
   }
@@ -105,7 +107,7 @@ function resolveSourceFiles(source: SourceConfig): ResolvedFile[] {
     const basePath = source.path || ".";
     return source.paths
       .map((p) => resolve(basePath, p))
-      .map(readFile)
+      .map((p) => readFile(p, basePath))
       .filter((f): f is ResolvedFile => f !== null);
   }
 
@@ -127,7 +129,7 @@ function resolveSourceFiles(source: SourceConfig): ResolvedFile[] {
       }
       return paths
         .map((p: string) => resolve(cwd, p))
-        .map(readFile)
+        .map((p) => readFile(p, cwd))
         .filter((f): f is ResolvedFile => f !== null);
     } catch (err: any) {
       process.stderr.write(
@@ -140,7 +142,7 @@ function resolveSourceFiles(source: SourceConfig): ResolvedFile[] {
   // Strategy 3: glob (flat or recursive)
   if (source.glob && source.path) {
     return walkDir(source.path, source.glob, !!source.recursive)
-      .map(readFile)
+      .map((p) => readFile(p, source.path!))
       .filter((f): f is ResolvedFile => f !== null);
   }
 
@@ -216,6 +218,7 @@ export function prewarm(
 
     for (const file of files) {
       const text = preprocessFile(file, source);
+      if (text.trim().length === 0) continue;
       const label = `${source.label}: ${file.name}`;
       const result = store.index({ content: text, source: label });
       totalSources++;
