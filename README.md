@@ -137,7 +137,7 @@ For files named `YYYY-MM-DD.md` (work logs):
 
 ## Subagent Hook (Optional)
 
-The wrapper includes `subagent-hook.sh` — a PreToolUse hook that teaches subagents to use context-mode tools instead of flooding the parent's context with raw output.
+The wrapper includes `subagent-hook.mjs` — a PreToolUse hook that teaches subagents to use context-mode tools instead of flooding the parent's context with raw output.
 
 **What it does:**
 
@@ -152,11 +152,11 @@ The wrapper includes `subagent-hook.sh` — a PreToolUse hook that teaches subag
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Task",
+        "matcher": "Agent",
         "hooks": [
           {
             "type": "command",
-            "command": "bash /absolute/path/to/context-wrapper/subagent-hook.sh"
+            "command": "node /absolute/path/to/context-wrapper/subagent-hook.mjs"
           }
         ]
       }
@@ -165,13 +165,9 @@ The wrapper includes `subagent-hook.sh` — a PreToolUse hook that teaches subag
 }
 ```
 
-Replace the path with the absolute path to your `context-wrapper/` directory. A Python version (`subagent-hook.py`) is also available — swap `bash ...subagent-hook.sh` for `python3 ...subagent-hook.py`.
-
-**Bash stdin quirk:** `jq` can't read CC's hook stdin via redirect (`jq < /dev/stdin` exits 1). Use `INPUT=$(cat)` to capture stdin into a variable, then pipe it: `echo "$INPUT" | jq ...`. The `cat | jq` pipe also works but only gives you one shot at the data.
+Replace the path with the absolute path to your `context-wrapper/` directory.
 
 **Note:** This hook nudges subagents toward context-mode tools but does not block standard tools. Subagents can still use Bash, Read, etc. when appropriate.
-
-**Naming quirk:** The matcher must be `"Task"` (that's what Claude Code dispatches), but the `tool_name` in the hook's JSON payload arrives as `"Agent"`. Both hook scripts handle this correctly — just be aware if writing your own.
 
 ## Portability
 
