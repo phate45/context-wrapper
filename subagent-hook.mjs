@@ -2,7 +2,10 @@
 /**
  * PreToolUse hook — injects context-mode routing into subagent prompts.
  *
- * Agent-type-aware routing:
+ * Custom profiles in .claude/context-mode.json override defaults:
+ *   { "subagentProfiles": { "<type>": { skip, ending, block } } }
+ *
+ * Default routing (when no profile matches):
  *   claude-code-guide, statusline-setup  →  pass through (no MCP tools)
  *   Plan                                 →  research tools, full output
  *   Bash                                 →  upgrade to general-purpose + full routing
@@ -13,6 +16,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 // ── Routing block fragments ──────────────────────────────────────
 // Shared core + composable endings. Plan agents get full output;
@@ -85,6 +89,23 @@ const ENDING_PLAN = `
 const FULL_ROUTING_BLOCK = CORE_BLOCK + ENDING_CONCISE;
 const PLAN_ROUTING_BLOCK = CORE_BLOCK + ENDING_PLAN;
 
+const ENDINGS = { plan: ENDING_PLAN, concise: ENDING_CONCISE };
+
+// ── Config Discovery ─────────────────────────────────────────────
+
+function findConfig(startDir) {
+  let dir = resolve(startDir);
+  while (true) {
+    try {
+      return JSON.parse(readFileSync(join(dir, ".claude", "context-mode.json"), "utf-8"));
+    } catch { /* not found */ }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 // ── Skip list: agents without MCP tool access ────────────────────
 
 const SKIP_TYPES = new Set(["claude-code-guide", "statusline-setup"]);
@@ -110,6 +131,35 @@ const toolInput = input.tool_input ?? {};
 const subagentType = toolInput.subagent_type ?? "";
 
 if (toolName !== "Agent") process.exit(0);
+
+// Check for custom profile override (takes priority over hardcoded defaults)
+const config = findConfig(process.cwd());
+const profile = config?.subagentProfiles?.[subagentType];
+
+if (profile) {
+  if (profile.skip) process.exit(0);
+
+  let routing;
+  if (profile.block) {
+    routing = profile.block;
+  } else if (profile.ending && ENDINGS[profile.ending]) {
+    routing = CORE_BLOCK + ENDINGS[profile.ending];
+  } else {
+    routing = FULL_ROUTING_BLOCK;
+  }
+
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      updatedInput: {
+        ...toolInput,
+        prompt: (toolInput.prompt ?? "") + routing,
+      },
+    },
+  }));
+  process.exit(0);
+}
+
 if (SKIP_TYPES.has(subagentType)) process.exit(0);
 
 // Select routing block

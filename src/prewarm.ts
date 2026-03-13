@@ -24,8 +24,21 @@ export interface SourceConfig {
   prefixDates?: boolean;
 }
 
+export interface SubagentProfile {
+  /** Skip injection entirely — agent gets no routing block. */
+  skip?: boolean;
+  /** Use CORE_BLOCK + named ending. */
+  ending?: "plan" | "concise";
+  /** Full custom injection text, replaces entire routing block. */
+  block?: string;
+}
+
 export interface Config {
   sources: SourceConfig[];
+  /** Per-agent-type routing overrides for the subagent hook. */
+  subagentProfiles?: Record<string, SubagentProfile>;
+  /** Control search budget warnings: false strips them, a string replaces them. */
+  searchReminder?: false | string;
 }
 
 interface ResolvedFile {
