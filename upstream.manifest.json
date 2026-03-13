@@ -1,6 +1,6 @@
 {
-  "tag": "v1.0.15",
-  "generated": "2026-03-08T16:40:22.383Z",
+  "tag": "v1.0.18",
+  "generated": "2026-03-13T08:19:19.526Z",
   "fingerprints": {
     "dependencies": {
       "hash": "2c95b6c52c808c6b",
@@ -15,8 +15,8 @@
       "value": "{\n  \".\": \"./build/opencode-plugin.js\",\n  \"./plugin\": \"./build/opencode-plugin.js\",\n  \"./cli\": \"./build/cli.js\"\n}"
     },
     "version": {
-      "hash": "c646138cd87adccb",
-      "value": "1.0.15"
+      "hash": "576fb8940cf99149",
+      "value": "1.0.18"
     }
   }
 }
