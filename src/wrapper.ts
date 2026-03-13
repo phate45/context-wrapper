@@ -188,6 +188,34 @@ async function main(): Promise<void> {
       arguments: args,
     });
 
+    // Intercept search responses when searchReminder is configured
+    if (
+      name === "search" &&
+      configResult?.config.searchReminder !== undefined
+    ) {
+      const reminder = configResult.config.searchReminder;
+      const content = (result as any).content;
+      if (Array.isArray(content)) {
+        for (const item of content) {
+          if (item.type !== "text" || typeof item.text !== "string") continue;
+
+          // Warning: appended to real results after throttle threshold
+          const warningRe = /\n\n⚠ search call #\d+\/\d+ in this window\..+$/s;
+          // Block: entire text is the refusal message
+          const blockRe = /^BLOCKED: \d+ search calls in \d+s\..+$/s;
+
+          if (warningRe.test(item.text)) {
+            item.text =
+              reminder === false
+                ? item.text.replace(warningRe, "")
+                : item.text.replace(warningRe, `\n\n${reminder}`);
+          } else if (blockRe.test(item.text)) {
+            item.text = reminder === false ? "" : String(reminder);
+          }
+        }
+      }
+    }
+
     return result as any;
   });
 
