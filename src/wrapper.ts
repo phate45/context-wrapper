@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   // 3. Connect MCP client — this starts the subprocess and runs the
   //    MCP initialize handshake. The upstream ContentStore is lazy
   //    (created on first tool call), so we can pre-warm after connect.
-  const client = new Client({ name: "context-wrapper", version: "0.1.0" });
+  const client = new Client({ name: "context-wrapper", version: "0.2.0" });
   await client.connect(clientTransport);
 
   const upstreamPid = clientTransport.pid;
@@ -155,7 +155,7 @@ async function main(): Promise<void> {
 
   // 6. Create our low-level MCP server
   const server = new Server(
-    { name: "context-wrapper", version: "0.1.0" },
+    { name: "context-wrapper", version: "0.2.0" },
     { capabilities: { tools: {} } },
   );
 

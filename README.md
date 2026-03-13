@@ -135,6 +135,25 @@ For files named `YYYY-MM-DD.md` (work logs):
 - Topic headings become `## [2026-02-28] Database Migration`
 - This makes search results self-documenting — you can see when something happened without checking the source filename
 
+## Search Reminder Control
+
+The upstream context-mode server progressively throttles `search()` calls and appends warning messages after the third call in a 60-second window. If these warnings create unwanted cognitive overhead, you can control them:
+
+```json
+{
+  "sources": [ ... ],
+  "searchReminder": false
+}
+```
+
+| Value | Effect |
+|-------|--------|
+| *(absent)* | Warnings pass through unchanged (default) |
+| `false` | Strip all throttle warnings and block messages |
+| `"custom text"` | Replace warnings with your own text |
+
+**Note:** This only controls the *message* — the upstream throttling behavior (reduced results per query after 3 calls, hard block after 8) still applies.
+
 ## Subagent Hook (Optional)
 
 The wrapper includes `subagent-hook.mjs` — a PreToolUse hook that teaches subagents to use context-mode tools instead of flooding the parent's context with raw output.
@@ -168,6 +187,31 @@ The wrapper includes `subagent-hook.mjs` — a PreToolUse hook that teaches suba
 Replace the path with the absolute path to your `context-wrapper/` directory.
 
 **Note:** This hook nudges subagents toward context-mode tools but does not block standard tools. Subagents can still use Bash, Read, etc. when appropriate.
+
+### Custom Subagent Profiles
+
+By default, all subagents get a 500-word response cap and dead-drop instructions, except `Plan` agents (full output) and a few skip types. You can override this per agent type in your `.claude/context-mode.json`:
+
+```json
+{
+  "sources": [ ... ],
+  "subagentProfiles": {
+    "review": { "ending": "plan" },
+    "my-fetcher": { "skip": true },
+    "custom-role": { "block": "<custom>Full replacement injection text</custom>" }
+  }
+}
+```
+
+Each profile key matches against `subagent_type`. Three modes (mutually exclusive):
+
+| Field | Effect |
+|-------|--------|
+| `skip: true` | No routing injected — agent runs unmodified |
+| `ending: "plan"` or `"concise"` | Uses the standard tool routing block with the named output constraints |
+| `block: "..."` | Full custom text, replaces the entire routing injection |
+
+Custom profiles take priority over all hardcoded defaults. You can override the built-in `Plan`, `Bash`, or skip-type behavior by defining a profile with that name.
 
 ## Portability
 

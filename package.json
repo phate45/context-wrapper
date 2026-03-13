@@ -1,6 +1,6 @@
 {
   "name": "context-wrapper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "private": true,
   "description": "Pre-warm wrapper for context-mode MCP server — indexes vault notes on startup",
