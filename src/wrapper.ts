@@ -12,7 +12,8 @@
  * schemas through the proxy without converting to zod types.
  */
 
-import { join, dirname } from "node:path";
+import { join, dirname, basename, resolve } from "node:path";
+import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -23,7 +24,14 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { findConfig, prewarm } from "./prewarm.ts";
+import {
+  findConfig,
+  prewarm,
+  walkDir,
+  readFile,
+  stripFrontmatter,
+  collapseBlankLines,
+} from "./prewarm.ts";
 
 // ── Tool Mapping ────────────────────────────────────────────────────
 
@@ -43,6 +51,49 @@ const REVERSE_MAP = new Map(
 
 /** Tools hidden from Claude Code entirely. */
 const HIDDEN = new Set(["ctx_stats", "ctx_doctor", "ctx_upgrade"]);
+
+/** Wrapper-only tool: index all files in a directory. */
+const INDEX_FOLDER_TOOL = {
+  name: "index_folder",
+  description:
+    "Index all matching files in a directory into the searchable BM25 knowledge base. " +
+    "Each file becomes a separate indexed source with its own label, enabling per-file " +
+    "search results. Re-indexing the same folder replaces previous content (dedup by label).\n\n" +
+    "Use for: documentation directories, note folders, code reference collections, " +
+    "any set of files you want searchable as a unit.\n" +
+    "After indexing, use 'search' to retrieve specific sections on-demand.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      path: {
+        type: "string",
+        description: "Absolute or relative path to the directory to index.",
+      },
+      glob: {
+        type: "string",
+        description:
+          'Filename pattern to match (e.g. "*.md", "*.txt"). Defaults to "*.md".',
+      },
+      recursive: {
+        type: "boolean",
+        description:
+          "Whether to walk subdirectories. Defaults to true.",
+      },
+      source: {
+        type: "string",
+        description:
+          'Label prefix for indexed content. Each file gets "{source}: {relative/path}". ' +
+          "Defaults to the directory basename.",
+      },
+      stripFrontmatter: {
+        type: "boolean",
+        description:
+          "Strip YAML frontmatter (---/---) from file starts before indexing. Defaults to true.",
+      },
+    },
+    required: ["path"],
+  },
+};
 
 // ── Main ────────────────────────────────────────────────────────────
 
@@ -153,6 +204,9 @@ async function main(): Promise<void> {
       return { ...t, name: ourName };
     });
 
+  // Add wrapper-only tools
+  ourTools.push(INDEX_FOLDER_TOOL);
+
   // 6. Create our low-level MCP server
   const server = new Server(
     { name: "context-wrapper", version: "0.2.0" },
@@ -167,6 +221,88 @@ async function main(): Promise<void> {
   // Handle tools/call — map name back to upstream and forward
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    // ── index_folder: wrapper-only, fan out to upstream ctx_index ──
+    if (name === "index_folder") {
+      const dirPath = resolve(String(args?.path ?? ""));
+      const glob = String(args?.glob ?? "*.md");
+      const recursive = args?.recursive !== false;
+      const doStrip = args?.stripFrontmatter !== false;
+      const sourcePrefix = String(
+        args?.source ?? basename(dirPath),
+      );
+
+      // Validate: must be a directory
+      let isDir = false;
+      try {
+        isDir = statSync(dirPath).isDirectory();
+      } catch {
+        /* doesn't exist */
+      }
+      if (!isDir) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: "${dirPath}" is not a directory.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const files = walkDir(dirPath, glob, recursive);
+      if (files.length === 0) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `No files matching "${glob}" found in ${dirPath}.`,
+            },
+          ],
+        };
+      }
+
+      let indexed = 0;
+      let totalChunks = 0;
+      const errors: string[] = [];
+
+      for (const filePath of files) {
+        const file = readFile(filePath, dirPath);
+        if (!file) continue;
+
+        let text = file.content;
+        if (doStrip) text = stripFrontmatter(text);
+        text = collapseBlankLines(text);
+        if (text.trim().length === 0) continue;
+
+        const label = `${sourcePrefix}: ${file.name}`;
+        try {
+          const result = await client.callTool({
+            name: "ctx_index",
+            arguments: { content: text, source: label },
+          });
+          // Extract chunk count from upstream response
+          const resText = (result as any)?.content?.[0]?.text ?? "";
+          const chunkMatch = resText.match(/^Indexed (\d+) sections/);
+          if (chunkMatch) totalChunks += parseInt(chunkMatch[1], 10);
+          indexed++;
+        } catch (err: any) {
+          errors.push(`${file.name}: ${err.message}`);
+        }
+      }
+
+      const summary =
+        `Indexed ${indexed} file${indexed !== 1 ? "s" : ""} ` +
+        `(${totalChunks} chunks) from ${dirPath}` +
+        (errors.length > 0
+          ? `\n\nErrors (${errors.length}):\n${errors.join("\n")}`
+          : "");
+
+      return { content: [{ type: "text" as const, text: summary }] };
+    }
+
+    // ── Standard tool forwarding ──
 
     // Route execute with path → ctx_execute_file
     let upstreamName: string;

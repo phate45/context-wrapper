@@ -41,7 +41,7 @@ export interface Config {
   searchReminder?: false | string;
 }
 
-interface ResolvedFile {
+export interface ResolvedFile {
   /** Display name — relative path from source base, for unique labeling. */
   name: string;
   path: string;
@@ -72,7 +72,7 @@ export function findConfig(
 
 // ── File Resolution ─────────────────────────────────────────────────
 
-function matchGlob(filename: string, pattern: string): boolean {
+export function matchGlob(filename: string, pattern: string): boolean {
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*")
@@ -80,7 +80,7 @@ function matchGlob(filename: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`).test(filename);
 }
 
-function walkDir(dir: string, glob: string, recursive: boolean): string[] {
+export function walkDir(dir: string, glob: string, recursive: boolean): string[] {
   const results: string[] = [];
   try {
     const entries = readdirSync(dir);
@@ -103,7 +103,7 @@ function walkDir(dir: string, glob: string, recursive: boolean): string[] {
   return results;
 }
 
-function readFile(fullPath: string, baseDir?: string): ResolvedFile | null {
+export function readFile(fullPath: string, baseDir?: string): ResolvedFile | null {
   try {
     const content = readFileSync(fullPath, "utf-8");
     if (content.trim().length === 0) return null;
@@ -167,7 +167,7 @@ function resolveSourceFiles(source: SourceConfig): ResolvedFile[] {
 
 // ── Preprocessing ───────────────────────────────────────────────────
 
-function stripFrontmatter(text: string): string {
+export function stripFrontmatter(text: string): string {
   if (!text.startsWith("---")) return text;
   const end = text.indexOf("\n---", 3);
   if (end === -1) return text;
@@ -195,7 +195,7 @@ function prefixDates(text: string, filename: string): string {
   return result.join("\n");
 }
 
-function collapseBlankLines(text: string): string {
+export function collapseBlankLines(text: string): string {
   return text.replace(/\n{3,}/g, "\n\n");
 }
 

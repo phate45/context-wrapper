@@ -111,6 +111,25 @@ search(queries: ["FTS5 schema"], source: "research-notes")
 
 The `source` parameter matches against labels. A source labeled `"work-logs"` creates entries like `"work-logs: 2026-02-28.md"`, so `source: "work-logs"` matches all files in that source.
 
+## Runtime Folder Indexing
+
+In addition to pre-warm (which runs at startup), the wrapper exposes an `index_folder` tool for on-demand indexing of entire directories. Each file becomes a separate searchable source with dedup-by-label — re-indexing the same folder replaces previous content.
+
+```
+index_folder(path: "/path/to/docs")
+index_folder(path: "/path/to/docs", glob: "*.txt", source: "my-docs")
+```
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `path` | ✅ | — | Directory to index |
+| `glob` | | `*.md` | Filename pattern to match |
+| `recursive` | | `true` | Walk subdirectories |
+| `source` | | dir basename | Label prefix — each file gets `"{source}: {relative/path}"` |
+| `stripFrontmatter` | | `true` | Strip YAML frontmatter before indexing |
+
+Files are preprocessed (frontmatter stripping, blank line collapsing), then forwarded individually to the upstream indexer. The response reports total files and chunks indexed.
+
 ## How It Works
 
 The wrapper runs three phases on startup:
