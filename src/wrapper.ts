@@ -117,6 +117,11 @@ async function main(): Promise<void> {
     args: [bundlePath],
     env: {
       ...(process.env as Record<string, string>),
+      // Override CLAUDE_PROJECT_DIR with our actual CWD so that context-mode's
+      // PolyglotExecutor runs shell commands from the worktree root, not the
+      // repo root. CC injects CLAUDE_PROJECT_DIR pointing at the repo root,
+      // which breaks relative paths when CC is launched inside a worktree.
+      CLAUDE_PROJECT_DIR: process.cwd(),
     },
     stderr: "inherit",
   });
