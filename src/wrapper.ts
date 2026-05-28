@@ -13,8 +13,9 @@
  */
 
 import { join, dirname, basename, resolve } from "node:path";
-import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -94,6 +95,40 @@ const INDEX_FOLDER_TOOL = {
     required: ["path"],
   },
 };
+
+// ── batch_read helpers ──────────────────────────────────────────────
+
+const ANCHOR_DIRS = new Set(["apps", "packages", "src", "lib"]);
+
+function deriveLabel(filePath: string): string {
+  const segments = filePath.split("/").filter(Boolean);
+
+  let anchorIdx = -1;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (ANCHOR_DIRS.has(segments[i])) {
+      anchorIdx = i;
+      break;
+    }
+  }
+
+  // Take everything after the last anchor dir; fall back to last two segments
+  let relevant = anchorIdx >= 0 ? segments.slice(anchorIdx + 1) : segments.slice(-2);
+
+  // Collapse intermediate 'src/' segments that add noise
+  relevant = relevant.filter((s) => s !== "src");
+
+  return relevant.join("/");
+}
+
+/** First occurrence keeps the clean label; subsequent duplicates get (2), (3), … */
+function deduplicateLabels(labels: string[]): string[] {
+  const seen = new Map<string, number>();
+  return labels.map((label) => {
+    const n = (seen.get(label) ?? 0) + 1;
+    seen.set(label, n);
+    return n > 1 ? `${label} (${n})` : label;
+  });
+}
 
 // ── Main ────────────────────────────────────────────────────────────
 
@@ -212,6 +247,42 @@ async function main(): Promise<void> {
   // Add wrapper-only tools
   ourTools.push(INDEX_FOLDER_TOOL);
 
+  // Append batch_read — wrapper-only tool with no upstream counterpart.
+  // It reads files directly, indexes them via ctx_index, and searches via
+  // ctx_search, scoping all indexed content under a per-call batch ID so
+  // follow-up searches can target exactly those files.
+  ourTools.push({
+    name: "batch_read",
+    description:
+      "Read multiple files, index them, and search across their contents. " +
+      "Use instead of batch_execute when all inputs are known file paths (no shell commands needed). " +
+      "Labels are auto-derived from file paths. Returns BM25 search results plus a batch ID — " +
+      "pass the batch ID as `source` to `search` for follow-up questions scoped to exactly these files.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "File paths to read and index. Absolute paths preferred; " +
+            "relative paths resolve from the current working directory.",
+          minItems: 1,
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Search queries to run against the indexed content. Use 5–8 comprehensive queries. " +
+            "Each returns top matching sections.",
+          minItems: 1,
+        },
+      },
+      required: ["files", "queries"],
+      additionalProperties: false,
+    },
+  });
+
   // 6. Create our low-level MCP server
   const server = new Server(
     { name: "context-wrapper", version: "0.2.0" },
@@ -305,6 +376,60 @@ async function main(): Promise<void> {
           : "");
 
       return { content: [{ type: "text" as const, text: summary }] };
+    }
+
+    // ── batch_read: wrapper-implemented, no upstream counterpart ────
+    if (name === "batch_read") {
+      const { files, queries } = args as { files: string[]; queries: string[] };
+
+      // Short random ID — 6 hex chars, unique per call.
+      // All files are indexed under "<batchId>/<label>" so a search
+      // scoped to batchId hits exactly this batch via partial match.
+      const batchId = randomBytes(3).toString("hex");
+
+      const rawLabels = files.map((f) => deriveLabel(resolve(f)));
+      const labels = deduplicateLabels(rawLabels);
+
+      // Index each file individually so ctx_index can chunk by heading
+      const skipped: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const filePath = resolve(files[i]);
+        const source = `${batchId}/${labels[i]}`;
+
+        let content: string;
+        try {
+          content = readFileSync(filePath, "utf-8");
+        } catch {
+          skipped.push(filePath);
+          continue;
+        }
+
+        await client.callTool({ name: "ctx_index", arguments: { content, source } });
+      }
+
+      // Search scoped to this batch only
+      const searchResult = await client.callTool({
+        name: "ctx_search",
+        arguments: { queries, source: batchId, limit: 3 },
+      });
+
+      const searchText =
+        (searchResult as any).content?.[0]?.text ?? "(no results)";
+
+      const errorNote =
+        skipped.length > 0
+          ? `\n\n⚠ Could not read ${skipped.length} file(s):\n${skipped.map((f) => `  - ${f}`).join("\n")}`
+          : "";
+
+      const followUpNote =
+        `\n\n---\n**Batch ID:** \`${batchId}\`\n` +
+        `To search only these files: \`search(queries: [...], source: "${batchId}")\``;
+
+      return {
+        content: [
+          { type: "text" as const, text: searchText + errorNote + followUpNote },
+        ],
+      };
     }
 
     // ── Standard tool forwarding ──
