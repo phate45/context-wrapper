@@ -1,15 +1,16 @@
 /**
- * Pre-warm pipeline for context-wrapper.
+ * Pre-warm + markdown ingest helpers for context-wrapper.
  *
- * Discovers .claude/context-mode.json, resolves source files via three
- * strategies (glob, exec, paths), preprocesses markdown, and indexes
- * into the context-mode FTS5 database so search() works immediately.
+ * Discovers .claude/context-mode.json, resolves source files, applies our
+ * markdown-specific preprocessing, and indexes into the wrapper-owned
+ * context-mode FTS5 database so search() works immediately.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join, dirname, basename, resolve, relative } from "node:path";
 import { ContentStore } from "../node_modules/context-mode/src/store.ts";
+import { resolveContentStorePath } from "../node_modules/context-mode/src/session/db.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -46,6 +47,15 @@ export interface ResolvedFile {
   name: string;
   path: string;
   content: string;
+}
+
+export interface IndexPathOptions {
+  path: string;
+  source?: string;
+  glob?: string;
+  recursive?: boolean;
+  stripFrontmatter?: boolean;
+  prefixDates?: boolean;
 }
 
 // ── Config Discovery ────────────────────────────────────────────────
@@ -174,7 +184,7 @@ export function stripFrontmatter(text: string): string {
   return text.slice(end + 4).replace(/^\n+/, "");
 }
 
-function prefixDates(text: string, filename: string): string {
+export function prefixDates(text: string, filename: string): string {
   const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})\.md$/);
   if (!dateMatch) return text;
   const date = dateMatch[1];
@@ -199,27 +209,98 @@ export function collapseBlankLines(text: string): string {
   return text.replace(/\n{3,}/g, "\n\n");
 }
 
+export function preprocessText(
+  text: string,
+  filename: string,
+  opts?: { stripFrontmatter?: boolean; prefixDates?: boolean },
+): string {
+  let next = text;
+  if (opts?.stripFrontmatter) next = stripFrontmatter(next);
+  if (opts?.prefixDates) next = prefixDates(next, filename);
+  return collapseBlankLines(next);
+}
+
 function preprocessFile(file: ResolvedFile, source: SourceConfig): string {
-  let text = file.content;
-  if (source.stripFrontmatter) text = stripFrontmatter(text);
-  if (source.prefixDates) text = prefixDates(text, file.name);
-  text = collapseBlankLines(text);
-  return text;
+  return preprocessText(file.content, file.name, {
+    stripFrontmatter: source.stripFrontmatter,
+    prefixDates: source.prefixDates,
+  });
+}
+
+// ── DB Path Resolution ──────────────────────────────────────────────
+
+export function getContentDbPath(storageRoot: string, projectDir: string): string {
+  const contentDir = join(storageRoot, "content");
+  mkdirSync(contentDir, { recursive: true });
+  return resolveContentStorePath({
+    projectDir: resolve(projectDir),
+    contentDir,
+  });
+}
+
+// ── Wrapper-side Path Indexing ──────────────────────────────────────
+
+export function resolveIndexPathFiles(opts: IndexPathOptions): {
+  basePath: string;
+  isDirectory: boolean;
+  files: ResolvedFile[];
+  sourcePrefix: string;
+} {
+  const basePath = resolve(opts.path);
+  const stat = statSync(basePath);
+  const sourcePrefix = String(opts.source ?? basename(basePath));
+
+  if (stat.isDirectory()) {
+    const glob = opts.glob ?? "*.md";
+    const recursive = opts.recursive !== false;
+    const files = walkDir(basePath, glob, recursive)
+      .map((p) => readFile(p, basePath))
+      .filter((f): f is ResolvedFile => f !== null);
+    return { basePath, isDirectory: true, files, sourcePrefix };
+  }
+
+  const file = readFile(basePath);
+  return {
+    basePath,
+    isDirectory: false,
+    files: file ? [file] : [],
+    sourcePrefix,
+  };
+}
+
+export function preprocessIndexPathFiles(
+  files: ResolvedFile[],
+  opts?: { stripFrontmatter?: boolean; prefixDates?: boolean },
+): Array<{ source: string; content: string; file: ResolvedFile }> {
+  const strip = opts?.stripFrontmatter !== false;
+  const prefix = opts?.prefixDates === true;
+
+  return files
+    .map((file) => ({
+      file,
+      content: preprocessText(file.content, file.name, {
+        stripFrontmatter: strip,
+        prefixDates: prefix,
+      }),
+    }))
+    .filter((entry) => entry.content.trim().length > 0)
+    .map((entry) => ({
+      ...entry,
+      source: entry.file.name,
+    }));
 }
 
 // ── Pre-Warm ────────────────────────────────────────────────────────
 
 /**
  * Index configured sources into the context-mode FTS5 database.
- *
- * @param config  Parsed .claude/context-mode.json
- * @param dbPath  Database path — pass `/tmp/context-mode-{pid}.db` using
- *                the upstream subprocess PID so the server finds our data.
  */
 export function prewarm(
   config: Config,
-  dbPath: string,
-): { totalSources: number; totalChunks: number } {
+  storageRoot: string,
+  projectDir: string,
+): { totalSources: number; totalChunks: number; dbPath: string } {
+  const dbPath = getContentDbPath(storageRoot, projectDir);
   const store = new ContentStore(dbPath);
 
   let totalSources = 0;
@@ -239,5 +320,6 @@ export function prewarm(
     }
   }
 
-  return { totalSources, totalChunks };
+  store.close();
+  return { totalSources, totalChunks, dbPath };
 }

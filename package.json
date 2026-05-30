@@ -9,11 +9,13 @@
     "build": "esbuild src/wrapper.ts --bundle --platform=node --target=node18 --format=esm --outfile=wrapper.bundle.mjs --packages=external --minify",
     "start": "node wrapper.bundle.mjs",
     "check": "tsx scripts/check-upstream.ts",
-    "bump": "tsx scripts/bump.ts"
+    "bump": "tsx scripts/bump.ts",
+    "test:e2e": "tsx scripts/e2e-smoke.ts",
+    "test": "bun run build && bun run check && bun run test:e2e"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "context-mode": "github:mksglu/context-mode#v1.0.18",
+    "context-mode": "github:mksglu/context-mode#v1.0.151",
     "zod": "^4.3.6"
   },
   "devDependencies": {

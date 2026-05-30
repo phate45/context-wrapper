@@ -4,9 +4,10 @@
  * Architecture:
  *   Claude Code ↔ Our Server (stdin/stdout) ↔ [MCP Client → child] ↔ Upstream Server
  *
- * Pre-warms the FTS5 database before connecting, so search() works immediately.
- * Renames tools (drops ctx_ prefix), merges execute + execute_file, hides
- * stats/doctor/upgrade.
+ * Pre-warms the upstream FTS5 database before any tool call, keeps all
+ * upstream storage under a wrapper-owned temp root, renames tools (drops
+ * ctx_ prefix), merges execute + execute_file, and hides upstream's
+ * session/meta surface.
  *
  * Uses the low-level Server class (not McpServer) so we can pass raw JSON
  * schemas through the proxy without converting to zod types.
@@ -14,7 +15,7 @@
 
 import { join, dirname, basename, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -27,11 +28,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   findConfig,
+  getContentDbPath,
   prewarm,
-  walkDir,
-  readFile,
-  stripFrontmatter,
-  collapseBlankLines,
+  preprocessIndexPathFiles,
+  resolveIndexPathFiles,
 } from "./prewarm.ts";
 
 // ── Tool Mapping ────────────────────────────────────────────────────
@@ -51,50 +51,24 @@ const REVERSE_MAP = new Map(
 );
 
 /** Tools hidden from Claude Code entirely. */
-const HIDDEN = new Set(["ctx_stats", "ctx_doctor", "ctx_upgrade"]);
+const HIDDEN = new Set([
+  "ctx_stats",
+  "ctx_doctor",
+  "ctx_upgrade",
+  "ctx_purge",
+  "ctx_insight",
+]);
 
-/** Wrapper-only tool: index all files in a directory. */
-const INDEX_FOLDER_TOOL = {
-  name: "index_folder",
-  description:
-    "Index all matching files in a directory into the searchable BM25 knowledge base. " +
-    "Each file becomes a separate indexed source with its own label, enabling per-file " +
-    "search results. Re-indexing the same folder replaces previous content (dedup by label).\n\n" +
-    "Use for: documentation directories, note folders, code reference collections, " +
-    "any set of files you want searchable as a unit.\n" +
-    "After indexing, use 'search' to retrieve specific sections on-demand.",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      path: {
-        type: "string",
-        description: "Absolute or relative path to the directory to index.",
-      },
-      glob: {
-        type: "string",
-        description:
-          'Filename pattern to match (e.g. "*.md", "*.txt"). Defaults to "*.md".',
-      },
-      recursive: {
-        type: "boolean",
-        description:
-          "Whether to walk subdirectories. Defaults to true.",
-      },
-      source: {
-        type: "string",
-        description:
-          'Label prefix for indexed content. Each file gets "{source}: {relative/path}". ' +
-          "Defaults to the directory basename.",
-      },
-      stripFrontmatter: {
-        type: "boolean",
-        description:
-          "Strip YAML frontmatter (---/---) from file starts before indexing. Defaults to true.",
-      },
-    },
-    required: ["path"],
-  },
-};
+const TOOL_DESCRIPTIONS = {
+  execute:
+    "Run code in the upstream sandbox. Use for derivation over files, command output, or fetched data without dumping raw bytes into context. When `path` is provided, the file is exposed inside the sandbox as FILE_CONTENT.",
+  search:
+    "Search indexed content with BM25/FTS5 ranking. Use after prewarm, index, fetch_and_index, batch_execute, or batch_read. Scope with `source` when you want results from a specific label or batch.",
+  fetch_and_index:
+    "Fetch one or more URLs, convert/index the content, and make it searchable. Use when the source is remote and you want retrieval via `search` instead of pasting raw page content into context.",
+  batch_execute:
+    "Run multiple shell commands, index their outputs, and optionally query the results in the same call. Use for multi-step collection where raw command output should converge into searchable indexed content.",
+} as const;
 
 // ── batch_read helpers ──────────────────────────────────────────────
 
@@ -130,9 +104,19 @@ function deduplicateLabels(labels: string[]): string[] {
   });
 }
 
+function extractChunkCount(result: unknown): number {
+  const text = (result as any)?.content?.[0]?.text ?? "";
+  const match = text.match(/^Indexed (\d+) sections/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  const projectDir = process.cwd();
+  const configResult = findConfig(projectDir);
+  const storageRoot = mkdtempSync(join(tmpdir(), "context-mode-"));
+
   // 1. Resolve the upstream server bundle relative to our install location,
   //    not CWD — the wrapper may be invoked from any project directory.
   const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -146,17 +130,19 @@ async function main(): Promise<void> {
     "server.bundle.mjs",
   );
 
-  // 2. Spawn the upstream server as a subprocess
+  // 2. Spawn the upstream server as a subprocess. Force all upstream state
+  //    under our temp root so persistent content/session machinery never
+  //    escapes into the user's global adapter dirs.
   const clientTransport = new StdioClientTransport({
     command: "node",
     args: [bundlePath],
+    cwd: projectDir,
     env: {
       ...(process.env as Record<string, string>),
-      // Override CLAUDE_PROJECT_DIR with our actual CWD so that context-mode's
-      // PolyglotExecutor runs shell commands from the worktree root, not the
-      // repo root. CC injects CLAUDE_PROJECT_DIR pointing at the repo root,
-      // which breaks relative paths when CC is launched inside a worktree.
-      CLAUDE_PROJECT_DIR: process.cwd(),
+      CONTEXT_MODE_DIR: storageRoot,
+      CONTEXT_MODE_PROJECT_DIR: projectDir,
+      CLAUDE_PROJECT_DIR: projectDir,
+      PWD: projectDir,
     },
     stderr: "inherit",
   });
@@ -175,23 +161,18 @@ async function main(): Promise<void> {
     `[context-wrapper] Connected to upstream server (pid ${upstreamPid})\n`,
   );
 
-  // 4. Pre-warm the database at the subprocess PID path.
-  //    Safe because getStore() hasn't been called yet — no tool calls
-  //    have arrived. Our data will be waiting when the store opens.
-  const configResult = findConfig(process.cwd());
+  // 4. Pre-warm the exact DB path the upstream child will open.
   if (configResult) {
-    const dbPath = join(tmpdir(), `context-mode-${upstreamPid}.db`);
     const start = performance.now();
-    const result = prewarm(configResult.config, dbPath);
+    const result = prewarm(configResult.config, storageRoot, projectDir);
     const elapsed = (performance.now() - start).toFixed(0);
     process.stderr.write(
       `[context-wrapper] Pre-warmed ${result.totalChunks} chunks from ` +
-        `${result.totalSources} files in ${elapsed}ms\n`,
+        `${result.totalSources} files in ${elapsed}ms (${result.dbPath})\n`,
     );
   }
 
   // 5. Fetch the upstream tool list and build our remapped version.
-  //    We do this once at startup; the list is static.
   const { tools: upstreamTools } = await client.listTools();
 
   // Find the execute_file tool — we merge its `path` param into execute
@@ -208,10 +189,9 @@ async function main(): Promise<void> {
       const ourName = REVERSE_MAP.get(t.name)!;
 
       if (ourName === "execute" && executeFileTool) {
-        // Merge execute + execute_file
         const mergedProperties = {
           ...(t.inputSchema.properties ?? {}),
-        };
+        } as Record<string, unknown>;
         if (executeFileTool.inputSchema.properties?.path) {
           mergedProperties.path = executeFileTool.inputSchema.properties.path;
         } else {
@@ -227,13 +207,7 @@ async function main(): Promise<void> {
         return {
           ...t,
           name: ourName,
-          description:
-            (t.description ?? "") +
-            "\n\nWhen `path` is provided, reads the file at that path into a " +
-            "FILE_CONTENT variable inside the sandbox. The full file contents do " +
-            "NOT enter context — only what you print. Use instead of Read/cat for " +
-            "log files, data files, large source files, or any file where you need " +
-            "to extract specific information rather than read the entire content.",
+          description: TOOL_DESCRIPTIONS.execute,
           inputSchema: {
             ...t.inputSchema,
             properties: mergedProperties,
@@ -241,16 +215,66 @@ async function main(): Promise<void> {
         };
       }
 
+      if (ourName === "index") {
+        return {
+          ...t,
+          name: ourName,
+          description:
+            "Store content in the searchable BM25 knowledge base. When `content` is provided, it is indexed directly. When `path` is provided, the wrapper reads files relative to the agent cwd, applies markdown preprocessing, and indexes each file as its own source.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              content: {
+                type: "string",
+                description: "Raw text/markdown to index. Provide this OR path, not both.",
+              },
+              path: {
+                type: "string",
+                description:
+                  "File or directory path to index. Relative paths resolve from the current working directory/worktree.",
+              },
+              source: {
+                type: "string",
+                description:
+                  "Source label. For directories, each file gets \"{source}: {relative/path}\". Defaults to the directory basename or resolved file path.",
+              },
+              glob: {
+                type: "string",
+                description: 'Directory-only filename pattern. Defaults to "*.md".',
+              },
+              recursive: {
+                type: "boolean",
+                description: "Directory-only recursive walk flag. Defaults to true.",
+              },
+              stripFrontmatter: {
+                type: "boolean",
+                description: "Path-based indexing only. Strip YAML frontmatter before indexing. Defaults to true.",
+              },
+              prefixDates: {
+                type: "boolean",
+                description: "Path-based indexing only. For YYYY-MM-DD.md files, prefix ## headings with [date]. Defaults to false.",
+              },
+            },
+          },
+        };
+      }
+
+      if (ourName === "search") {
+        return { ...t, name: ourName, description: TOOL_DESCRIPTIONS.search };
+      }
+
+      if (ourName === "fetch_and_index") {
+        return { ...t, name: ourName, description: TOOL_DESCRIPTIONS.fetch_and_index };
+      }
+
+      if (ourName === "batch_execute") {
+        return { ...t, name: ourName, description: TOOL_DESCRIPTIONS.batch_execute };
+      }
+
       return { ...t, name: ourName };
     });
 
-  // Add wrapper-only tools
-  ourTools.push(INDEX_FOLDER_TOOL);
-
   // Append batch_read — wrapper-only tool with no upstream counterpart.
-  // It reads files directly, indexes them via ctx_index, and searches via
-  // ctx_search, scoping all indexed content under a per-call batch ID so
-  // follow-up searches can target exactly those files.
   ourTools.push({
     name: "batch_read",
     description:
@@ -289,111 +313,95 @@ async function main(): Promise<void> {
     { capabilities: { tools: {} } },
   );
 
-  // Handle tools/list — return our pre-built remapped list
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: ourTools,
   }));
 
-  // Handle tools/call — map name back to upstream and forward
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    // ── index_folder: wrapper-only, fan out to upstream ctx_index ──
-    if (name === "index_folder") {
-      const dirPath = resolve(String(args?.path ?? ""));
-      const glob = String(args?.glob ?? "*.md");
-      const recursive = args?.recursive !== false;
-      const doStrip = args?.stripFrontmatter !== false;
-      const sourcePrefix = String(
-        args?.source ?? basename(dirPath),
-      );
-
-      // Validate: must be a directory
-      let isDir = false;
+    // ── index(path=...): wrapper-owned markdown/file ingest ─────────
+    if (name === "index" && args?.path !== undefined) {
+      const targetPath = resolve(projectDir, String(args.path));
+      let resolved;
       try {
-        isDir = statSync(dirPath).isDirectory();
-      } catch {
-        /* doesn't exist */
-      }
-      if (!isDir) {
+        resolved = resolveIndexPathFiles({
+          path: targetPath,
+          source: typeof args.source === "string" ? args.source : undefined,
+          glob: typeof args.glob === "string" ? args.glob : undefined,
+          recursive: typeof args.recursive === "boolean" ? args.recursive : undefined,
+          stripFrontmatter: typeof args.stripFrontmatter === "boolean" ? args.stripFrontmatter : undefined,
+          prefixDates: typeof args.prefixDates === "boolean" ? args.prefixDates : undefined,
+        });
+      } catch (err: any) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: "${dirPath}" is not a directory.`,
-            },
-          ],
+          content: [{ type: "text" as const, text: `Index error: ${err.message}` }],
           isError: true,
         };
       }
 
-      const files = walkDir(dirPath, glob, recursive);
-      if (files.length === 0) {
+      if (resolved.files.length === 0) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `No files matching "${glob}" found in ${dirPath}.`,
-            },
-          ],
+          content: [{
+            type: "text" as const,
+            text: resolved.isDirectory
+              ? `No files matched in ${resolved.basePath}.`
+              : `Nothing indexable found at ${resolved.basePath}.`,
+          }],
         };
       }
+
+      const prepared = preprocessIndexPathFiles(resolved.files, {
+        stripFrontmatter: typeof args.stripFrontmatter === "boolean" ? args.stripFrontmatter : undefined,
+        prefixDates: typeof args.prefixDates === "boolean" ? args.prefixDates : undefined,
+      });
 
       let indexed = 0;
       let totalChunks = 0;
       const errors: string[] = [];
 
-      for (const filePath of files) {
-        const file = readFile(filePath, dirPath);
-        if (!file) continue;
-
-        let text = file.content;
-        if (doStrip) text = stripFrontmatter(text);
-        text = collapseBlankLines(text);
-        if (text.trim().length === 0) continue;
-
-        const label = `${sourcePrefix}: ${file.name}`;
+      for (const entry of prepared) {
+        const source = resolved.isDirectory
+          ? `${resolved.sourcePrefix}: ${entry.source}`
+          : String(args.source ?? resolved.basePath);
         try {
           const result = await client.callTool({
             name: "ctx_index",
-            arguments: { content: text, source: label },
+            arguments: { content: entry.content, source },
           });
-          // Extract chunk count from upstream response
-          const resText = (result as any)?.content?.[0]?.text ?? "";
-          const chunkMatch = resText.match(/^Indexed (\d+) sections/);
-          if (chunkMatch) totalChunks += parseInt(chunkMatch[1], 10);
+          totalChunks += extractChunkCount(result);
           indexed++;
         } catch (err: any) {
-          errors.push(`${file.name}: ${err.message}`);
+          errors.push(`${entry.file.name}: ${err.message}`);
         }
       }
 
-      const summary =
-        `Indexed ${indexed} file${indexed !== 1 ? "s" : ""} ` +
-        `(${totalChunks} chunks) from ${dirPath}` +
-        (errors.length > 0
-          ? `\n\nErrors (${errors.length}):\n${errors.join("\n")}`
-          : "");
+      const summary = resolved.isDirectory
+        ? `Indexed ${indexed} file${indexed === 1 ? "" : "s"} (${totalChunks} chunks) from ${resolved.basePath}`
+        : `Indexed ${totalChunks} sections from: ${String(args.source ?? resolved.basePath)}`;
 
-      return { content: [{ type: "text" as const, text: summary }] };
+      return {
+        content: [{
+          type: "text" as const,
+          text: errors.length > 0
+            ? `${summary}\n\nErrors (${errors.length}):\n${errors.join("\n")}`
+            : summary,
+        }],
+        isError: errors.length > 0 && indexed === 0,
+      };
     }
 
     // ── batch_read: wrapper-implemented, no upstream counterpart ────
     if (name === "batch_read") {
       const { files, queries } = args as { files: string[]; queries: string[] };
 
-      // Short random ID — 6 hex chars, unique per call.
-      // All files are indexed under "<batchId>/<label>" so a search
-      // scoped to batchId hits exactly this batch via partial match.
       const batchId = randomBytes(3).toString("hex");
-
-      const rawLabels = files.map((f) => deriveLabel(resolve(f)));
+      const rawLabels = files.map((f) => deriveLabel(resolve(projectDir, f)));
       const labels = deduplicateLabels(rawLabels);
 
-      // Index each file individually so ctx_index can chunk by heading
       const skipped: string[] = [];
       for (let i = 0; i < files.length; i++) {
-        const filePath = resolve(files[i]);
+        const filePath = resolve(projectDir, files[i]);
         const source = `${batchId}/${labels[i]}`;
 
         let content: string;
@@ -407,7 +415,6 @@ async function main(): Promise<void> {
         await client.callTool({ name: "ctx_index", arguments: { content, source } });
       }
 
-      // Search scoped to this batch only
       const searchResult = await client.callTool({
         name: "ctx_search",
         arguments: { queries, source: batchId, limit: 3 },
@@ -432,9 +439,8 @@ async function main(): Promise<void> {
       };
     }
 
-    // ── Standard tool forwarding ──
+    // ── Standard tool forwarding ───────────────────────────────────
 
-    // Route execute with path → ctx_execute_file
     let upstreamName: string;
     if (name === "execute" && args?.path !== undefined) {
       upstreamName = "ctx_execute_file";
@@ -465,9 +471,7 @@ async function main(): Promise<void> {
         for (const item of content) {
           if (item.type !== "text" || typeof item.text !== "string") continue;
 
-          // Warning: appended to real results after throttle threshold
           const warningRe = /\n\n⚠ search call #\d+\/\d+ in this window\..+$/s;
-          // Block: entire text is the refusal message
           const blockRe = /^BLOCKED: \d+ search calls in \d+s\..+$/s;
 
           if (warningRe.test(item.text)) {
@@ -489,23 +493,16 @@ async function main(): Promise<void> {
   const serverTransport = new StdioServerTransport();
   await server.connect(serverTransport);
   process.stderr.write(
-    `[context-wrapper] MCP server ready (${ourTools.length} tools)\n`,
+    `[context-wrapper] MCP server ready (${ourTools.length} tools) [tmp=${storageRoot}]\n`,
   );
 
   // 8. Graceful shutdown
-  //
-  //    When CC disconnects, stdin reaches EOF. The MCP SDK's
-  //    StdioServerTransport doesn't listen for 'end', so without
-  //    this handler both our process and the upstream child idle
-  //    forever as zombies.
   const shutdown = async () => {
     await Promise.allSettled([client.close(), server.close()]);
   };
 
-  // CC disconnect → stdin EOF
   process.stdin.on("end", () => process.exit(0));
 
-  // Interactive / external signals
   process.on("SIGINT", async () => {
     await shutdown();
     process.exit(0);
@@ -515,13 +512,16 @@ async function main(): Promise<void> {
     process.exit(0);
   });
 
-  // Last-resort sync cleanup — process.kill() is synchronous so
-  // it works inside the 'exit' handler where async can't complete.
   process.on("exit", () => {
     try {
       process.kill(upstreamPid);
     } catch {
       /* already dead */
+    }
+    try {
+      rmSync(storageRoot, { recursive: true, force: true });
+    } catch {
+      /* ignore */
     }
   });
 }

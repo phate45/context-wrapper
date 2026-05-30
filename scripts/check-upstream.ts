@@ -79,10 +79,10 @@ const probes: Probe[] = [
   },
   {
     name: "version",
-    description: "Upstream version constant",
+    description: "Upstream package version",
     extract() {
-      const src = readUpstream("src/server.ts");
-      return src.match(/VERSION\s*=\s*"([^"]+)"/)?.[1] ?? "unknown";
+      const pkg = JSON.parse(readUpstream("package.json"));
+      return pkg.version ?? "unknown";
     },
   },
 ];

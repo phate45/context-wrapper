@@ -1,6 +1,6 @@
 # context-wrapper
 
-Pre-warm wrapper for the [context-mode](https://github.com/mksglu/claude-context-mode) MCP server. Indexes configured markdown files into the FTS5 search database before the server starts, so `search()` returns results immediately — no manual indexing step required.
+Pre-warm wrapper for the [context-mode](https://github.com/mksglu/context-mode) MCP server. It keeps upstream storage in a temp sandbox, indexes configured markdown content before the first tool call, and exposes a narrow tool surface focused on sandbox execution and search.
 
 ## Requirements
 
@@ -99,9 +99,22 @@ Hardcode a list of file paths. Relative paths resolve from `path` (or CWD if omi
 | `stripFrontmatter` | Remove YAML `---` frontmatter blocks from start of files. Default: `false` |
 | `prefixDates` | For date-named files (`2026-02-28.md`): prefix `##` headings with `[YYYY-MM-DD]`. Default: `false` |
 
+### Public Tool Surface
+
+The wrapper exposes only:
+
+- `execute`
+- `index`
+- `search`
+- `fetch_and_index`
+- `batch_execute`
+- `batch_read`
+
+Upstream meta/session tools such as stats, doctor, upgrade, purge, and insight are hidden.
+
 ### Searching Pre-Warmed Content
 
-Pre-warmed content is searchable through the standard context-mode tools:
+Pre-warmed content is searchable through the standard tools:
 
 ```
 search(queries: ["tmux configuration"])
@@ -111,34 +124,45 @@ search(queries: ["FTS5 schema"], source: "research-notes")
 
 The `source` parameter matches against labels. A source labeled `"work-logs"` creates entries like `"work-logs: 2026-02-28.md"`, so `source: "work-logs"` matches all files in that source.
 
-## Runtime Folder Indexing
+## Runtime Indexing
 
-In addition to pre-warm (which runs at startup), the wrapper exposes an `index_folder` tool for on-demand indexing of entire directories. Each file becomes a separate searchable source with dedup-by-label — re-indexing the same folder replaces previous content.
+Use `index(...)` for on-demand indexing.
+
+### Index raw content
 
 ```
-index_folder(path: "/path/to/docs")
-index_folder(path: "/path/to/docs", glob: "*.txt", source: "my-docs")
+index(content: "# Notes\n\n...", source: "notes")
 ```
 
-| Parameter | Required | Default | Description |
-|-----------|----------|---------|-------------|
-| `path` | ✅ | — | Directory to index |
-| `glob` | | `*.md` | Filename pattern to match |
-| `recursive` | | `true` | Walk subdirectories |
-| `source` | | dir basename | Label prefix — each file gets `"{source}: {relative/path}"` |
-| `stripFrontmatter` | | `true` | Strip YAML frontmatter before indexing |
+### Index a file or folder
 
-Files are preprocessed (frontmatter stripping, blank line collapsing), then forwarded individually to the upstream indexer. The response reports total files and chunks indexed.
+```
+index(path: "/path/to/doc.md")
+index(path: "/path/to/docs", source: "docs")
+index(path: "/path/to/docs", glob: "*.txt", recursive: true, source: "docs")
+```
+
+| Parameter | Applies To | Default | Description |
+|-----------|------------|---------|-------------|
+| `content` | raw content | — | Text/markdown to index directly |
+| `path` | file or folder | — | File or directory to read relative to the current working directory if not absolute |
+| `source` | both | path/basename | Source label. Directory indexing uses `"{source}: {relative/path}"` per file |
+| `glob` | directory | `*.md` | Filename pattern for directory indexing |
+| `recursive` | directory | `true` | Walk subdirectories |
+| `stripFrontmatter` | path | `true` | Strip YAML frontmatter before indexing |
+| `prefixDates` | path | `false` | For `YYYY-MM-DD.md`, prefix `##` headings with `[date]` |
+
+Path-based indexing uses wrapper preprocessing, then forwards the transformed content to upstream indexing. Each file becomes its own searchable source.
 
 ## How It Works
 
 The wrapper runs three phases on startup:
 
 1. **Discover** — Walks up from CWD looking for `.claude/context-mode.json`
-2. **Pre-warm** — Creates a SQLite FTS5 database at `/tmp/context-mode-{PID}.db`, populates it with preprocessed and chunked content from the configured sources
-3. **Launch** — Dynamic-imports the context-mode server bundle, which finds the pre-warmed database and serves it
+2. **Launch upstream in temp storage** — Spawns the upstream server with `CONTEXT_MODE_DIR` pointing at a wrapper-owned temp root under `/tmp/context-mode-*`
+3. **Pre-warm** — Resolves the exact upstream content DB path inside that temp root and populates it with preprocessed content from the configured sources before the first search call
 
-If no config file is found, the wrapper skips pre-warming and starts the server normally — identical behavior to running context-mode directly.
+If no config file is found, the wrapper still launches the upstream server in temp storage but skips pre-warming.
 
 ## Preprocessing Details
 
