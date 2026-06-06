@@ -10,8 +10,10 @@
     "start": "node wrapper.bundle.mjs",
     "check": "tsx scripts/check-upstream.ts",
     "bump": "tsx scripts/bump.ts",
+    "test:filters": "tsx scripts/output-filter-smoke.ts",
     "test:e2e": "tsx scripts/e2e-smoke.ts",
-    "test": "bun run build && bun run check && bun run test:e2e"
+    "test:all": "bun run test:filters && bun run test:e2e",
+    "test": "bun run build && bun run check && bun run test:all"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

@@ -33,6 +33,10 @@ import {
   preprocessIndexPathFiles,
   resolveIndexPathFiles,
 } from "./prewarm.ts";
+import {
+  applySearchReminderFilter,
+  sanitizeUpstreamTextContent,
+} from "./output-filter.ts";
 
 // ── Tool Mapping ────────────────────────────────────────────────────
 
@@ -108,24 +112,6 @@ function extractChunkCount(result: unknown): number {
   const text = (result as any)?.content?.[0]?.text ?? "";
   const match = text.match(/^Indexed (\d+) sections/);
   return match ? parseInt(match[1], 10) : 0;
-}
-
-function stripVersionReminder(text: string): string {
-  return text.replace(
-    /^⚠️ context-mode v[^\n]+ outdated → v[^\n]+ available\. Upgrade: [^\n]+\n\n/,
-    "",
-  );
-}
-
-function sanitizeUpstreamTextContent(result: unknown): void {
-  const content = (result as any)?.content;
-  if (!Array.isArray(content)) return;
-
-  for (const item of content) {
-    if (item?.type === "text" && typeof item.text === "string") {
-      item.text = stripVersionReminder(item.text);
-    }
-  }
 }
 
 // ── Main ────────────────────────────────────────────────────────────
@@ -485,25 +471,7 @@ async function main(): Promise<void> {
       name === "search" &&
       configResult?.config.searchReminder !== undefined
     ) {
-      const reminder = configResult.config.searchReminder;
-      const content = (result as any).content;
-      if (Array.isArray(content)) {
-        for (const item of content) {
-          if (item.type !== "text" || typeof item.text !== "string") continue;
-
-          const warningRe = /\n\n⚠ search call #\d+\/\d+ in this window\..+$/s;
-          const blockRe = /^BLOCKED: \d+ search calls in \d+s\..+$/s;
-
-          if (warningRe.test(item.text)) {
-            item.text =
-              reminder === false
-                ? item.text.replace(warningRe, "")
-                : item.text.replace(warningRe, `\n\n${reminder}`);
-          } else if (blockRe.test(item.text)) {
-            item.text = reminder === false ? "" : String(reminder);
-          }
-        }
-      }
+      applySearchReminderFilter(result, configResult.config.searchReminder);
     }
 
     return result as any;

@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkUpstream, renderCheckResult, writeManifest } from "./check-upstream.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -33,4 +34,24 @@ console.log("  Installing...\n");
 execSync("bun install", { cwd: root, stdio: "inherit" });
 
 console.log("");
-execSync("bun run check", { cwd: root, stdio: "inherit" });
+const result = await checkUpstream();
+renderCheckResult(result);
+
+if (result.blockingChanges.length > 0) {
+  console.log(
+    `  ${result.blockingChanges.length} blocking change(s) detected. Review above, then run with --update to accept.\n`,
+  );
+  process.exit(1);
+}
+
+const onlyVersionChanged =
+  result.changes.length > 0 && result.changes.every((change) => change.name === "version");
+
+if (onlyVersionChanged) {
+  writeManifest(result.tag, result.fingerprints);
+  console.log("  Version-only drift detected; manifest auto-updated.\n");
+} else if (result.changes.length === 0) {
+  // renderCheckResult already printed “All clear.”
+} else {
+  console.log("  Informational change(s) detected. Review above, then run bun run check --update to accept.\n");
+}
