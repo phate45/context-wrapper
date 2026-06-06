@@ -73,7 +73,8 @@ async function main(): Promise<void> {
       arguments: { language: "shell", code: "pwd" },
     });
     const execText = (exec as any).content?.[0]?.text ?? "";
-    assert.equal(execText.trim(), cwd);
+    assert.match(execText, /```shell\npwd\n```/);
+    assert.match(execText, new RegExp(`${cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
 
     const index = await client.callTool({
       name: "index",

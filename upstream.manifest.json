@@ -1,6 +1,6 @@
 {
-  "tag": "v1.0.151",
-  "generated": "2026-05-30T12:50:57.262Z",
+  "tag": "v1.0.162",
+  "generated": "2026-06-06T09:14:23.479Z",
   "fingerprints": {
     "dependencies": {
       "hash": "2c95b6c52c808c6b",
@@ -15,8 +15,8 @@
       "value": "{\n  \".\": \"./build/adapters/opencode/plugin.js\",\n  \"./plugin\": \"./build/adapters/opencode/plugin.js\",\n  \"./openclaw\": \"./build/adapters/openclaw/plugin.js\",\n  \"./cli\": \"./cli.bundle.mjs\"\n}"
     },
     "version": {
-      "hash": "9d170e826af271cb",
-      "value": "1.0.151"
+      "hash": "6ee872fcff6204f4",
+      "value": "1.0.162"
     }
   }
 }
