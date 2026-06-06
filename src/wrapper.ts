@@ -110,6 +110,24 @@ function extractChunkCount(result: unknown): number {
   return match ? parseInt(match[1], 10) : 0;
 }
 
+function stripVersionReminder(text: string): string {
+  return text.replace(
+    /^⚠️ context-mode v[^\n]+ outdated → v[^\n]+ available\. Upgrade: [^\n]+\n\n/,
+    "",
+  );
+}
+
+function sanitizeUpstreamTextContent(result: unknown): void {
+  const content = (result as any)?.content;
+  if (!Array.isArray(content)) return;
+
+  for (const item of content) {
+    if (item?.type === "text" && typeof item.text === "string") {
+      item.text = stripVersionReminder(item.text);
+    }
+  }
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -459,6 +477,8 @@ async function main(): Promise<void> {
       name: upstreamName,
       arguments: args,
     });
+
+    sanitizeUpstreamTextContent(result);
 
     // Intercept search responses when searchReminder is configured
     if (
