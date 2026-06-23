@@ -16,6 +16,8 @@ import { resolveContentStorePath } from "../node_modules/context-mode/src/sessio
 
 export interface SourceConfig {
   label: string;
+  /** Author annotation describing what this source is. Folded into the search manifest. */
+  description?: string;
   path?: string;
   glob?: string;
   recursive?: boolean;
@@ -292,6 +294,14 @@ export function preprocessIndexPathFiles(
 
 // ── Pre-Warm ────────────────────────────────────────────────────────
 
+/** Per-source-label rollup of what prewarm actually indexed. */
+export interface PrewarmSourceSummary {
+  label: string;
+  description?: string;
+  files: number;
+  chunks: number;
+}
+
 /**
  * Index configured sources into the context-mode FTS5 database.
  */
@@ -299,12 +309,20 @@ export function prewarm(
   config: Config,
   storageRoot: string,
   projectDir: string,
-): { totalSources: number; totalChunks: number; dbPath: string } {
+): {
+  totalSources: number;
+  totalChunks: number;
+  dbPath: string;
+  sources: PrewarmSourceSummary[];
+} {
   const dbPath = getContentDbPath(storageRoot, projectDir);
   const store = new ContentStore(dbPath);
 
   let totalSources = 0;
   let totalChunks = 0;
+  // Aggregate per source.label, preserving config order. Two source entries
+  // sharing a label fold into one manifest entry.
+  const summaries = new Map<string, PrewarmSourceSummary>();
 
   for (const source of config.sources) {
     const files = resolveSourceFiles(source);
@@ -317,9 +335,45 @@ export function prewarm(
       const result = store.index({ content: text, source: label });
       totalSources++;
       totalChunks += result.totalChunks;
+
+      const summary = summaries.get(source.label) ?? {
+        label: source.label,
+        description: source.description,
+        files: 0,
+        chunks: 0,
+      };
+      summary.files++;
+      summary.chunks += result.totalChunks;
+      summaries.set(source.label, summary);
     }
   }
 
   store.close();
-  return { totalSources, totalChunks, dbPath };
+  return {
+    totalSources,
+    totalChunks,
+    dbPath,
+    sources: [...summaries.values()],
+  };
+}
+
+/**
+ * Render a one-line manifest of the pre-warmed corpus for the `search` tool
+ * description. Returns null when nothing was indexed (caller falls back to the
+ * static description).
+ */
+export function formatPrewarmManifest(
+  sources: PrewarmSourceSummary[],
+): string | null {
+  if (sources.length === 0) return null;
+
+  const entries = sources.map((s) => {
+    const count = `\`${s.label}\` (${s.files} file${s.files === 1 ? "" : "s"})`;
+    return s.description ? `${count} — ${s.description}` : count;
+  });
+
+  return (
+    "Pre-warmed at startup and searchable now (no `index` call needed): " +
+    `${entries.join("; ")}. Scope to one with \`source: "<label>"\`.`
+  );
 }

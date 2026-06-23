@@ -28,6 +28,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   findConfig,
+  formatPrewarmManifest,
   getContentDbPath,
   prewarm,
   preprocessIndexPathFiles,
@@ -165,7 +166,10 @@ async function main(): Promise<void> {
     `[context-wrapper] Connected to upstream server (pid ${upstreamPid})\n`,
   );
 
-  // 4. Pre-warm the exact DB path the upstream child will open.
+  // 4. Pre-warm the exact DB path the upstream child will open. Fold the
+  //    resulting corpus manifest into the search description so the agent can
+  //    see what is already searchable without a blind probe.
+  let searchDescription = TOOL_DESCRIPTIONS.search;
   if (configResult) {
     const start = performance.now();
     const result = prewarm(configResult.config, storageRoot, projectDir);
@@ -174,6 +178,8 @@ async function main(): Promise<void> {
       `[context-wrapper] Pre-warmed ${result.totalChunks} chunks from ` +
         `${result.totalSources} files in ${elapsed}ms (${result.dbPath})\n`,
     );
+    const manifest = formatPrewarmManifest(result.sources);
+    if (manifest) searchDescription += `\n\n${manifest}`;
   }
 
   // 5. Fetch the upstream tool list and build our remapped version.
@@ -264,7 +270,7 @@ async function main(): Promise<void> {
       }
 
       if (ourName === "search") {
-        return { ...t, name: ourName, description: TOOL_DESCRIPTIONS.search };
+        return { ...t, name: ourName, description: searchDescription };
       }
 
       if (ourName === "fetch_and_index") {

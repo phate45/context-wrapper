@@ -91,6 +91,7 @@ Hardcode a list of file paths. Relative paths resolve from `path` (or CWD if omi
 | Field | Description |
 |-------|-------------|
 | `label` | **(required)** Source tag for scoped search (`source: "work-logs"`) |
+| `description` | Short annotation of what the source is. Folded into the `search` tool description so the agent sees the pre-warmed corpus without a blind probe. |
 | `path` | Base directory. Required for glob, optional for exec/paths (used as CWD / base for relative paths) |
 | `glob` | File pattern to match (e.g. `*.md`). Requires `path`. |
 | `recursive` | Walk subdirectories when using glob. Default: `false` |
@@ -123,6 +124,8 @@ search(queries: ["FTS5 schema"], source: "research-notes")
 ```
 
 The `source` parameter matches against labels. A source labeled `"work-logs"` creates entries like `"work-logs: 2026-02-28.md"`, so `source: "work-logs"` matches all files in that source.
+
+At startup the wrapper appends a manifest of the pre-warmed corpus to the `search` tool's description — each source's `label`, file count, and `description` (if set). Hosts that pass `tools/list` descriptions through to the model surface this automatically, so the agent knows what is already searchable.
 
 ## Runtime Indexing
 

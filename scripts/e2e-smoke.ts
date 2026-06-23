@@ -24,6 +24,7 @@ async function main(): Promise<void> {
         sources: [
           {
             label: "vault",
+            description: "test vault notes",
             path: cwd,
             glob: "*.md",
             recursive: false,
@@ -59,6 +60,11 @@ async function main(): Promise<void> {
       "index",
       "search",
     ]);
+
+    const searchDescription =
+      tools.find((t) => t.name === "search")?.description ?? "";
+    assert.match(searchDescription, /Pre-warmed at startup/);
+    assert.match(searchDescription, /`vault` \(1 file\) — test vault notes/);
 
     const prewarm = await client.callTool({
       name: "search",
