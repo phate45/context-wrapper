@@ -66,6 +66,17 @@ async function main(): Promise<void> {
     assert.match(searchDescription, /Pre-warmed at startup/);
     assert.match(searchDescription, /`vault` \(1 file\) — test vault notes/);
 
+    // queries is advertised as array-OR-string so strict clients accept
+    // the JSON-encoded form weak models emit.
+    const searchQueriesSchema = (
+      tools.find((t) => t.name === "search")?.inputSchema as any
+    )?.properties?.queries;
+    assert.ok(Array.isArray(searchQueriesSchema?.anyOf), "search.queries should be anyOf");
+    assert.deepEqual(
+      searchQueriesSchema.anyOf.map((b: any) => b.type),
+      ["array", "string"],
+    );
+
     const prewarm = await client.callTool({
       name: "search",
       arguments: { queries: ["prewarm-token-xyz"], limit: 3 },
@@ -73,6 +84,22 @@ async function main(): Promise<void> {
     const prewarmText = (prewarm as any).content?.[0]?.text ?? "";
     assert.match(prewarmText, /prewarm-token-xyz/);
     assert.match(prewarmText, /vault: hello\.md/);
+
+    // JSON-encoded-string queries are coerced to a real array.
+    const stringQueries = await client.callTool({
+      name: "search",
+      arguments: { queries: '["prewarm-token-xyz"]', limit: 3 },
+    });
+    const stringQueriesText = (stringQueries as any).content?.[0]?.text ?? "";
+    assert.match(stringQueriesText, /prewarm-token-xyz/);
+
+    // Malformed JSON-looking queries are rejected, not silently lifted.
+    const badQueries = await client.callTool({
+      name: "search",
+      arguments: { queries: '["prewarm-token-xyz"', limit: 3 },
+    });
+    assert.equal((badQueries as any).isError, true);
+    assert.match((badQueries as any).content?.[0]?.text ?? "", /looks like a JSON array/);
 
     const exec = await client.callTool({
       name: "execute",
@@ -111,6 +138,18 @@ async function main(): Promise<void> {
     assert.match(batchReadText, /Batch ID:/);
     assert.match(batchReadText, /hello\.md/);
     assert.match(batchReadText, /guide\.md/);
+
+    // batch_read coerces JSON-encoded-string files and queries too.
+    const batchReadStr = await client.callTool({
+      name: "batch_read",
+      arguments: {
+        files: '["hello.md", "docs/guide.md"]',
+        queries: '["prewarm-token-xyz", "folder-token-abc"]',
+      },
+    });
+    const batchReadStrText = (batchReadStr as any).content?.[0]?.text ?? "";
+    assert.match(batchReadStrText, /prewarm-token-xyz/);
+    assert.match(batchReadStrText, /folder-token-abc/);
 
     console.log("e2e smoke: ok");
   } finally {

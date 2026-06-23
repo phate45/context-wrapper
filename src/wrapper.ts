@@ -115,6 +115,98 @@ function extractChunkCount(result: unknown): number {
   return match ? parseInt(match[1], 10) : 0;
 }
 
+// ── Liberal array coercion ──────────────────────────────────────────
+//
+// Strict MCP clients validate tool args against the advertised JSON
+// schema before dispatch. Weak models frequently emit array params as a
+// JSON-encoded string (queries: "[\"a\",\"b\"]"), which those clients
+// reject before the call ever reaches us. We advertise such params as
+// "array OR string" (widenStringArrayParam) and normalize the value back
+// to an array here, so the advertised contract matches what we accept.
+
+type CoerceResult =
+  | { ok: true; value: string[] }
+  | { ok: false; message: string };
+
+/**
+ * Normalize a string-array argument that may arrive as a real array, a
+ * JSON-encoded array string, or a bare single value.
+ *
+ *   ["a","b"]   → ["a","b"]
+ *   '["a","b"]' → ["a","b"]   (JSON-encoded array)
+ *   "a"         → ["a"]       (bare value lifted to a single element)
+ *   '["a"'      → error       (looks like JSON, won't parse — not masked)
+ *   ""          → error
+ */
+function coerceStringArray(val: unknown, field: string): CoerceResult {
+  if (Array.isArray(val)) {
+    if (val.every((v) => typeof v === "string")) return { ok: true, value: val };
+    return { ok: false, message: `${field} must be an array of strings.` };
+  }
+  if (typeof val === "string") {
+    const trimmed = val.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, message: `${field} must not be empty.` };
+    }
+    // A leading "[" signals intent to pass an array; if it won't parse to
+    // string[] that's malformed input, not a single bare query.
+    if (trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed) && parsed.every((v) => typeof v === "string")) {
+          return { ok: true, value: parsed };
+        }
+      } catch {
+        /* fall through to the error below */
+      }
+      return {
+        ok: false,
+        message: `${field} looks like a JSON array but did not parse to an array of strings: ${val}`,
+      };
+    }
+    return { ok: true, value: [val] };
+  }
+  return { ok: false, message: `${field} must be an array of strings.` };
+}
+
+/** True for a JSON-schema property shaped like `{ type: "array", items: { type: "string" } }`. */
+function isStringArrayProp(prop: any): boolean {
+  return (
+    !!prop &&
+    prop.type === "array" &&
+    !!prop.items &&
+    prop.items.type === "string"
+  );
+}
+
+/**
+ * Rewrite a string-array property to `anyOf: [array, string]` so strict
+ * clients accept the JSON-encoded-string form. Array-form constraints
+ * (`items`, `minItems`) are preserved on the array branch.
+ */
+function widenStringArrayParam(prop: any): any {
+  const arrayBranch: any = { type: "array", items: prop.items ?? { type: "string" } };
+  if (prop.minItems !== undefined) arrayBranch.minItems = prop.minItems;
+  return {
+    description:
+      (prop.description ? prop.description + " " : "") +
+      'Accepts either an array of strings or a JSON-encoded array string, e.g. "[\\"a\\",\\"b\\"]".',
+    anyOf: [arrayBranch, { type: "string" }],
+  };
+}
+
+/** Return a copy of `schema` with the named string-array properties widened. */
+function widenSchemaArrays(schema: any, fields: string[]): any {
+  if (!schema?.properties) return schema;
+  const properties = { ...schema.properties };
+  for (const field of fields) {
+    if (isStringArrayProp(properties[field])) {
+      properties[field] = widenStringArrayParam(properties[field]);
+    }
+  }
+  return { ...schema, properties };
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -270,7 +362,12 @@ async function main(): Promise<void> {
       }
 
       if (ourName === "search") {
-        return { ...t, name: ourName, description: searchDescription };
+        return {
+          ...t,
+          name: ourName,
+          description: searchDescription,
+          inputSchema: widenSchemaArrays(t.inputSchema, ["queries"]),
+        };
       }
 
       if (ourName === "fetch_and_index") {
@@ -295,22 +392,22 @@ async function main(): Promise<void> {
     inputSchema: {
       type: "object" as const,
       properties: {
-        files: {
+        files: widenStringArrayParam({
           type: "array",
           items: { type: "string" },
           description:
             "File paths to read and index. Absolute paths preferred; " +
             "relative paths resolve from the current working directory.",
           minItems: 1,
-        },
-        queries: {
+        }),
+        queries: widenStringArrayParam({
           type: "array",
           items: { type: "string" },
           description:
             "Search queries to run against the indexed content. Use 5–8 comprehensive queries. " +
             "Each returns top matching sections.",
           minItems: 1,
-        },
+        }),
       },
       required: ["files", "queries"],
       additionalProperties: false,
@@ -403,7 +500,23 @@ async function main(): Promise<void> {
 
     // ── batch_read: wrapper-implemented, no upstream counterpart ────
     if (name === "batch_read") {
-      const { files, queries } = args as { files: string[]; queries: string[] };
+      const filesC = coerceStringArray(args?.files, "files");
+      const queriesC = coerceStringArray(args?.queries, "queries");
+      const argErrors = [
+        ...(filesC.ok ? [] : [filesC.message]),
+        ...(queriesC.ok ? [] : [queriesC.message]),
+      ];
+      if (argErrors.length > 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Invalid arguments for batch_read:\n${argErrors.map((m) => `  - ${m}`).join("\n")}`,
+          }],
+          isError: true,
+        };
+      }
+      const files = (filesC as { value: string[] }).value;
+      const queries = (queriesC as { value: string[] }).value;
 
       const batchId = randomBytes(3).toString("hex");
       const rawLabels = files.map((f) => deriveLabel(resolve(projectDir, f)));
@@ -451,6 +564,21 @@ async function main(): Promise<void> {
 
     // ── Standard tool forwarding ───────────────────────────────────
 
+    let forwardArgs = args;
+    if (name === "search" && args?.queries !== undefined) {
+      const coerced = coerceStringArray(args.queries, "queries");
+      if (!coerced.ok) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Invalid arguments for search:\n  - ${coerced.message}`,
+          }],
+          isError: true,
+        };
+      }
+      forwardArgs = { ...args, queries: coerced.value };
+    }
+
     let upstreamName: string;
     if (name === "execute" && args?.path !== undefined) {
       upstreamName = "ctx_execute_file";
@@ -467,7 +595,7 @@ async function main(): Promise<void> {
 
     const result = await client.callTool({
       name: upstreamName,
-      arguments: args,
+      arguments: forwardArgs,
     });
 
     sanitizeUpstreamTextContent(result);
