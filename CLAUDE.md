@@ -46,7 +46,7 @@ Our process is both:
 Hidden: `ctx_stats`, `ctx_doctor`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`.
 
 ### Pre-Warm Phase
-1. Walk up from CWD looking for `.claude/context-mode.json` (first match wins)
+1. Walk up from CWD looking for `.claude/context-mode.json` (first match wins). `CONTEXT_WRAPPER_CONFIG`, if set, overrides discovery with an exact file path (skips the walk; hard-errors if unreadable/invalid)
 2. Spawn upstream with `CONTEXT_MODE_DIR` pointing at a wrapper-owned temp root under `/tmp/context-mode-*`
 3. Resolve source files via three strategies: glob, exec, or explicit paths
 4. Preprocess (strip frontmatter, prefix dates, collapse blanks)

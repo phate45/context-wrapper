@@ -62,9 +62,34 @@ export interface IndexPathOptions {
 
 // ── Config Discovery ────────────────────────────────────────────────
 
+// Env var pointing at an exact config file. When set, the upward walk is
+// skipped and the file is loaded verbatim; an unreadable or invalid file is a
+// hard error rather than a silent fallback, since setting it signals intent.
+export const CONFIG_ENV_VAR = "CONTEXT_WRAPPER_CONFIG";
+
 export function findConfig(
   startDir: string,
 ): { config: Config; configPath: string } | null {
+  const override = process.env[CONFIG_ENV_VAR];
+  if (override) {
+    const configPath = resolve(override);
+    let raw: string;
+    try {
+      raw = readFileSync(configPath, "utf-8");
+    } catch (err) {
+      throw new Error(
+        `${CONFIG_ENV_VAR} points at "${configPath}" but it could not be read: ${(err as Error).message}`,
+      );
+    }
+    try {
+      return { config: JSON.parse(raw), configPath };
+    } catch (err) {
+      throw new Error(
+        `${CONFIG_ENV_VAR} config at "${configPath}" is not valid JSON: ${(err as Error).message}`,
+      );
+    }
+  }
+
   let dir = resolve(startDir);
 
   while (true) {

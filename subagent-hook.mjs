@@ -94,6 +94,18 @@ const ENDINGS = { plan: ENDING_PLAN, concise: ENDING_CONCISE };
 // ── Config Discovery ─────────────────────────────────────────────
 
 function findConfig(startDir) {
+  // CONTEXT_WRAPPER_CONFIG mirrors the wrapper's exact-path override. Unlike the
+  // wrapper this hook stays fail-soft: a bad config must not block Agent spawns,
+  // so an unreadable override falls through to null rather than throwing.
+  const override = process.env.CONTEXT_WRAPPER_CONFIG;
+  if (override) {
+    try {
+      return JSON.parse(readFileSync(resolve(override), "utf-8"));
+    } catch {
+      return null;
+    }
+  }
+
   let dir = resolve(startDir);
   while (true) {
     try {

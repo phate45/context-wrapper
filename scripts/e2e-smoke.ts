@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -152,6 +152,69 @@ async function main(): Promise<void> {
     assert.match(batchReadStrText, /folder-token-abc/);
 
     console.log("e2e smoke: ok");
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  await configEnvOverride();
+}
+
+// Proves CONTEXT_WRAPPER_CONFIG loads an exact file and bypasses the CWD walk:
+// the launch cwd has no .claude/context-mode.json anywhere up its tree, so a
+// successful pre-warm can only come from the env-pointed config.
+async function configEnvOverride(): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "cw-e2e-env-"));
+  const launchCwd = join(root, "no-config");
+  mkdirSync(launchCwd, { recursive: true });
+  writeFileSync(join(launchCwd, "note.md"), "# Env\n\nenv-override-token-789\n");
+
+  const configPath = join(root, "elsewhere", "ctx.json");
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      sources: [
+        {
+          label: "envvault",
+          description: "env-override notes",
+          path: launchCwd,
+          glob: "*.md",
+          recursive: false,
+        },
+      ],
+    }),
+  );
+
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: [join(process.cwd(), "wrapper.bundle.mjs")],
+    cwd: launchCwd,
+    stderr: "inherit",
+    env: {
+      ...(process.env as Record<string, string>),
+      PWD: launchCwd,
+      CONTEXT_WRAPPER_CONFIG: configPath,
+    },
+  });
+  const client = new Client({ name: "context-wrapper-e2e-env", version: "0.0.0" });
+
+  try {
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    const searchDescription =
+      tools.find((t) => t.name === "search")?.description ?? "";
+    assert.match(searchDescription, /`envvault` \(1 file\) — env-override notes/);
+
+    const prewarm = await client.callTool({
+      name: "search",
+      arguments: { queries: ["env-override-token-789"], limit: 3 },
+    });
+    const prewarmText = (prewarm as any).content?.[0]?.text ?? "";
+    assert.match(prewarmText, /env-override-token-789/);
+    assert.match(prewarmText, /envvault: note\.md/);
+
+    console.log("e2e smoke (config env override): ok");
   } finally {
     await client.close().catch(() => {});
     rmSync(root, { recursive: true, force: true });

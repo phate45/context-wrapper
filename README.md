@@ -20,7 +20,7 @@ If you already have a `context-mode` entry in your `.mcp.json`, replace it — t
 
 ## Project Configuration
 
-Create `.claude/context-mode.json` in any project that should have pre-warmed content:
+Create `.claude/context-mode.json` in any project that should have pre-warmed content. To point at a config file outside the project tree, set `CONTEXT_WRAPPER_CONFIG` to its absolute path — the wrapper loads it verbatim and skips the upward `.claude/context-mode.json` search.
 
 Each source needs a `label` and a file selection strategy. Three strategies are available:
 
@@ -161,7 +161,7 @@ Path-based indexing uses wrapper preprocessing, then forwards the transformed co
 
 The wrapper runs three phases on startup:
 
-1. **Discover** — Walks up from CWD looking for `.claude/context-mode.json`
+1. **Discover** — Walks up from CWD looking for `.claude/context-mode.json`. Set `CONTEXT_WRAPPER_CONFIG` to an exact config file path to skip the walk and load that file directly (a set-but-unreadable or invalid file is a hard error).
 2. **Launch upstream in temp storage** — Spawns the upstream server with `CONTEXT_MODE_DIR` pointing at a wrapper-owned temp root under `/tmp/context-mode-*`
 3. **Pre-warm** — Resolves the exact upstream content DB path inside that temp root and populates it with preprocessed content from the configured sources before the first search call
 
