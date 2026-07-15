@@ -240,6 +240,7 @@ async function main(): Promise<void> {
       CONTEXT_MODE_PROJECT_DIR: projectDir,
       CLAUDE_PROJECT_DIR: projectDir,
       PWD: projectDir,
+      CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
     },
     stderr: "inherit",
   });
